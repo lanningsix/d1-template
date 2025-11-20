@@ -1,13 +1,3 @@
-/*
- * :file description:
- * :name: \d1-template\src\index.ts
- * :author: liuwei
- * :copyright: (c) 2025, Tungee
- * :date created: 2025-11-20 11:23:38
- * :last editor: liuwei
- * :date last edited: 2025-11-20 18:11:25
- */
-
 export default {
   async fetch(request, env, ctx) {
     // Handle CORS
@@ -47,7 +37,9 @@ export default {
       try {
         // === GET: 读取并组装数据 ===
         if (request.method === 'GET') {
-          // 1. 获取基础设置
+          const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar'
+
+          // 1. 获取基础设置 (Always fetch settings for balance/theme)
           const settings = await env.DB.prepare(
             'SELECT * FROM settings WHERE family_id = ?'
           )
@@ -61,30 +53,59 @@ export default {
             })
           }
 
-          // 2. 并行获取其他表数据
-          const [tasksResult, rewardsResult, logsResult, txResult] =
-            await Promise.all([
+          let tasksResult, rewardsResult, logsResult, txResult
+
+          // 2. 按需并行获取其他表数据
+          // scope 'daily' needs: tasks, logs
+          // scope 'store' needs: rewards
+          // scope 'calendar' needs: transactions
+          // scope 'all' needs: everything (used for init or settings tab)
+
+          const promises = []
+
+          if (scope === 'all' || scope === 'daily' || scope === 'settings') {
+            promises.push(
               env.DB.prepare('SELECT * FROM tasks WHERE family_id = ?')
                 .bind(familyId)
-                .all(),
-              env.DB.prepare('SELECT * FROM rewards WHERE family_id = ?')
-                .bind(familyId)
-                .all(),
+                .all()
+                .then((r) => (tasksResult = r))
+            )
+            promises.push(
               env.DB.prepare(
                 'SELECT date_key, task_id FROM task_logs WHERE family_id = ?'
               )
                 .bind(familyId)
-                .all(),
+                .all()
+                .then((r) => (logsResult = r))
+            )
+          }
+
+          if (scope === 'all' || scope === 'store' || scope === 'settings') {
+            promises.push(
+              env.DB.prepare('SELECT * FROM rewards WHERE family_id = ?')
+                .bind(familyId)
+                .all()
+                .then((r) => (rewardsResult = r))
+            )
+          }
+
+          if (scope === 'all' || scope === 'calendar' || scope === 'settings') {
+            promises.push(
               env.DB.prepare(
                 'SELECT * FROM transactions WHERE family_id = ? ORDER BY created_at DESC LIMIT 100'
               )
                 .bind(familyId)
-                .all(),
-            ])
+                .all()
+                .then((r) => (txResult = r))
+            )
+          }
+
+          await Promise.all(promises)
 
           // 3. 转换 Logs 格式 (DB Rows -> Record<date, ids[]>)
-          const logsMap = {}
-          if (logsResult.results) {
+          let logsMap = undefined
+          if (logsResult && logsResult.results) {
+            logsMap = {}
             logsResult.results.forEach((row) => {
               if (!logsMap[row.date_key]) logsMap[row.date_key] = []
               logsMap[row.date_key].push(row.task_id)
@@ -92,15 +113,16 @@ export default {
           }
 
           // 4. 组装最终 JSON
+          // 注意：未请求的数据字段应为 undefined，这样前端 JSON.stringify 后 key 会消失或前端判断时为 falsy，不会覆盖现有 state
           const data = {
             familyId: settings.family_id,
             userName: settings.user_name || '',
             themeKey: settings.theme_key || 'lemon',
             balance: settings.balance || 0,
-            tasks: tasksResult.results || [],
-            rewards: rewardsResult.results || [],
+            tasks: tasksResult ? tasksResult.results || [] : undefined,
+            rewards: rewardsResult ? rewardsResult.results || [] : undefined,
             logs: logsMap,
-            transactions: txResult.results || [],
+            transactions: txResult ? txResult.results || [] : undefined,
           }
 
           return new Response(JSON.stringify({ data }), {
@@ -126,16 +148,15 @@ export default {
           )
 
           if (scope === 'tasks') {
-            // 策略: 删除该家庭所有旧任务，插入新列表 (全量同步)
-            statements.push(
-              env.DB.prepare('DELETE FROM tasks WHERE family_id = ?').bind(
-                familyId
-              )
-            )
-            const insertStmt = env.DB.prepare(
-              'INSERT INTO tasks (id, family_id, title, category, stars, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
-            )
             if (Array.isArray(data)) {
+              statements.push(
+                env.DB.prepare('DELETE FROM tasks WHERE family_id = ?').bind(
+                  familyId
+                )
+              )
+              const insertStmt = env.DB.prepare(
+                'INSERT INTO tasks (id, family_id, title, category, stars, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+              )
               data.forEach((t) => {
                 statements.push(
                   insertStmt.bind(
@@ -150,15 +171,15 @@ export default {
               })
             }
           } else if (scope === 'rewards') {
-            statements.push(
-              env.DB.prepare('DELETE FROM rewards WHERE family_id = ?').bind(
-                familyId
-              )
-            )
-            const insertStmt = env.DB.prepare(
-              'INSERT INTO rewards (id, family_id, title, cost, icon, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
-            )
             if (Array.isArray(data)) {
+              statements.push(
+                env.DB.prepare('DELETE FROM rewards WHERE family_id = ?').bind(
+                  familyId
+                )
+              )
+              const insertStmt = env.DB.prepare(
+                'INSERT INTO rewards (id, family_id, title, cost, icon, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+              )
               data.forEach((r) => {
                 statements.push(
                   insertStmt.bind(
@@ -173,17 +194,22 @@ export default {
               })
             }
           } else if (scope === 'settings') {
-            // 更新设置 (Partial Update)
-            const updateStmt = env.DB.prepare(`
-                UPDATE settings 
-                SET user_name = ?, theme_key = ?, updated_at = ? 
-                WHERE family_id = ?
-             `)
-            statements.push(
-              updateStmt.bind(data.userName, data.themeKey, timestamp, familyId)
-            )
+            if (data) {
+              const updateStmt = env.DB.prepare(`
+                    UPDATE settings 
+                    SET user_name = ?, theme_key = ?, updated_at = ? 
+                    WHERE family_id = ?
+                 `)
+              statements.push(
+                updateStmt.bind(
+                  data.userName,
+                  data.themeKey,
+                  timestamp,
+                  familyId
+                )
+              )
+            }
           } else if (scope === 'activity') {
-            // 1. 更新余额
             if (data.balance !== undefined) {
               statements.push(
                 env.DB.prepare(
@@ -192,8 +218,6 @@ export default {
               )
             }
 
-            // 2. 覆盖 Logs (全量同步)
-            // 注意：对于日志量特别大的情况，全量覆盖可能效率较低。但在家庭场景下是可以接受的。
             if (data.logs) {
               statements.push(
                 env.DB.prepare(
@@ -215,7 +239,6 @@ export default {
               }
             }
 
-            // 3. 覆盖 Transactions (全量同步)
             if (data.transactions) {
               statements.push(
                 env.DB.prepare(
@@ -243,7 +266,6 @@ export default {
             }
           }
 
-          // 执行批量事务
           if (statements.length > 0) {
             await env.DB.batch(statements)
           }
