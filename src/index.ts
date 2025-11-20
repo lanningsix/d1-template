@@ -37,9 +37,9 @@ export default {
       try {
         // === GET: 读取并组装数据 ===
         if (request.method === 'GET') {
-          const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar'
+          const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar', 'avatar'
 
-          // 1. 获取基础设置 (Always fetch settings for balance/theme)
+          // 1. 获取基础设置 (Always fetch settings for balance/theme/avatar)
           const settings = await env.DB.prepare(
             'SELECT * FROM settings WHERE family_id = ?'
           )
@@ -54,13 +54,6 @@ export default {
           }
 
           let tasksResult, rewardsResult, logsResult, txResult
-
-          // 2. 按需并行获取其他表数据
-          // scope 'daily' needs: tasks, logs
-          // scope 'store' needs: rewards
-          // scope 'calendar' needs: transactions
-          // scope 'all' needs: everything (used for init or settings tab)
-
           const promises = []
 
           if (scope === 'all' || scope === 'daily' || scope === 'settings') {
@@ -102,7 +95,7 @@ export default {
 
           await Promise.all(promises)
 
-          // 3. 转换 Logs 格式 (DB Rows -> Record<date, ids[]>)
+          // 3. 转换 Logs 格式
           let logsMap = undefined
           if (logsResult && logsResult.results) {
             logsMap = {}
@@ -113,12 +106,14 @@ export default {
           }
 
           // 4. 组装最终 JSON
-          // 注意：未请求的数据字段应为 undefined，这样前端 JSON.stringify 后 key 会消失或前端判断时为 falsy，不会覆盖现有 state
           const data = {
             familyId: settings.family_id,
             userName: settings.user_name || '',
             themeKey: settings.theme_key || 'lemon',
             balance: settings.balance || 0,
+            avatar: settings.avatar_data
+              ? JSON.parse(settings.avatar_data)
+              : undefined,
             tasks: tasksResult ? tasksResult.results || [] : undefined,
             rewards: rewardsResult ? rewardsResult.results || [] : undefined,
             logs: logsMap,
@@ -140,7 +135,7 @@ export default {
           const timestamp = Date.now()
           const statements = []
 
-          // 确保主表存在 (Upsert family entry)
+          // 确保主表存在
           statements.push(
             env.DB.prepare(
               'INSERT OR IGNORE INTO settings (family_id, created_at, updated_at) VALUES (?, ?, ?)'
@@ -209,6 +204,24 @@ export default {
                 )
               )
             }
+          } else if (scope === 'avatar') {
+            // Update Avatar Data (balance is usually updated in activity, but can be here if needed, though separation is better)
+            // We might receive balance here if buying items updates balance immediately
+            const avatarJson = data.avatar ? JSON.stringify(data.avatar) : null
+
+            if (data.balance !== undefined) {
+              statements.push(
+                env.DB.prepare(
+                  'UPDATE settings SET avatar_data = ?, balance = ?, updated_at = ? WHERE family_id = ?'
+                ).bind(avatarJson, data.balance, timestamp, familyId)
+              )
+            } else {
+              statements.push(
+                env.DB.prepare(
+                  'UPDATE settings SET avatar_data = ?, updated_at = ? WHERE family_id = ?'
+                ).bind(avatarJson, timestamp, familyId)
+              )
+            }
           } else if (scope === 'activity') {
             if (data.balance !== undefined) {
               statements.push(
@@ -217,7 +230,6 @@ export default {
                 ).bind(data.balance, timestamp, familyId)
               )
             }
-
             if (data.logs) {
               statements.push(
                 env.DB.prepare(
@@ -227,7 +239,6 @@ export default {
               const logInsert = env.DB.prepare(
                 'INSERT INTO task_logs (family_id, date_key, task_id, created_at) VALUES (?, ?, ?, ?)'
               )
-
               for (const [dateKey, taskIds] of Object.entries(data.logs)) {
                 if (Array.isArray(taskIds)) {
                   taskIds.forEach((tid) => {
@@ -238,7 +249,6 @@ export default {
                 }
               }
             }
-
             if (data.transactions) {
               statements.push(
                 env.DB.prepare(
