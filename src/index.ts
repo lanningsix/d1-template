@@ -39,7 +39,7 @@ export default {
         if (request.method === 'GET') {
           const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar', 'avatar', 'wishlist'
 
-          // 1. 获取基础设置 (Always fetch settings for balance/theme/avatar)
+          // 1. 获取基础设置 (Always fetch settings for balance/theme/avatar/stats)
           const settings = await env.DB.prepare(
             'SELECT * FROM settings WHERE family_id = ?'
           )
@@ -135,6 +135,10 @@ export default {
             avatar: settings.avatar_data
               ? JSON.parse(settings.avatar_data)
               : undefined,
+            lifetimeEarnings: settings.lifetime_earned || 0,
+            unlockedAchievements: settings.achievements_data
+              ? JSON.parse(settings.achievements_data)
+              : [],
             tasks: tasksResult ? tasksResult.results || [] : undefined,
             rewards: rewardsResult ? rewardsResult.results || [] : undefined,
             wishlist: wishlist,
@@ -251,9 +255,7 @@ export default {
               )
             }
           } else if (scope === 'avatar') {
-            // Update Avatar Data (balance is usually updated in activity, but can be here if needed, though separation is better)
             const avatarJson = data.avatar ? JSON.stringify(data.avatar) : null
-
             if (data.balance !== undefined) {
               statements.push(
                 env.DB.prepare(
@@ -268,13 +270,36 @@ export default {
               )
             }
           } else if (scope === 'activity') {
+            // Update balance, lifetime stats, logs, transactions
+            const fieldsToUpdate = []
+            const values = []
+
             if (data.balance !== undefined) {
+              fieldsToUpdate.push('balance = ?')
+              values.push(data.balance)
+            }
+            if (data.lifetimeEarnings !== undefined) {
+              fieldsToUpdate.push('lifetime_earned = ?')
+              values.push(data.lifetimeEarnings)
+            }
+            if (data.unlockedAchievements !== undefined) {
+              fieldsToUpdate.push('achievements_data = ?')
+              values.push(JSON.stringify(data.unlockedAchievements))
+            }
+
+            if (fieldsToUpdate.length > 0) {
+              fieldsToUpdate.push('updated_at = ?')
+              values.push(timestamp)
+              values.push(familyId)
               statements.push(
                 env.DB.prepare(
-                  'UPDATE settings SET balance = ?, updated_at = ? WHERE family_id = ?'
-                ).bind(data.balance, timestamp, familyId)
+                  `UPDATE settings SET ${fieldsToUpdate.join(
+                    ', '
+                  )} WHERE family_id = ?`
+                ).bind(...values)
               )
             }
+
             if (data.logs) {
               statements.push(
                 env.DB.prepare(
