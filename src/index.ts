@@ -37,7 +37,7 @@ export default {
       try {
         // === GET: 读取并组装数据 ===
         if (request.method === 'GET') {
-          const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar', 'avatar'
+          const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar', 'avatar', 'wishlist'
 
           // 1. 获取基础设置 (Always fetch settings for balance/theme/avatar)
           const settings = await env.DB.prepare(
@@ -53,7 +53,7 @@ export default {
             })
           }
 
-          let tasksResult, rewardsResult, logsResult, txResult
+          let tasksResult, rewardsResult, logsResult, txResult, wishlistResult
           const promises = []
 
           if (scope === 'all' || scope === 'daily' || scope === 'settings') {
@@ -82,6 +82,15 @@ export default {
             )
           }
 
+          if (scope === 'all' || scope === 'store' || scope === 'wishlist') {
+            promises.push(
+              env.DB.prepare('SELECT * FROM wishlist_goals WHERE family_id = ?')
+                .bind(familyId)
+                .all()
+                .then((r) => (wishlistResult = r))
+            )
+          }
+
           if (scope === 'all' || scope === 'calendar' || scope === 'settings') {
             promises.push(
               env.DB.prepare(
@@ -105,6 +114,18 @@ export default {
             })
           }
 
+          // 转换 Wishlist 字段名
+          const wishlist =
+            wishlistResult && wishlistResult.results
+              ? wishlistResult.results.map((r) => ({
+                  id: r.id,
+                  title: r.title,
+                  targetCost: r.target_cost,
+                  currentSaved: r.current_saved,
+                  icon: r.icon,
+                }))
+              : undefined
+
           // 4. 组装最终 JSON
           const data = {
             familyId: settings.family_id,
@@ -116,6 +137,7 @@ export default {
               : undefined,
             tasks: tasksResult ? tasksResult.results || [] : undefined,
             rewards: rewardsResult ? rewardsResult.results || [] : undefined,
+            wishlist: wishlist,
             logs: logsMap,
             transactions: txResult ? txResult.results || [] : undefined,
           }
@@ -188,6 +210,30 @@ export default {
                 )
               })
             }
+          } else if (scope === 'wishlist') {
+            if (Array.isArray(data)) {
+              statements.push(
+                env.DB.prepare(
+                  'DELETE FROM wishlist_goals WHERE family_id = ?'
+                ).bind(familyId)
+              )
+              const insertStmt = env.DB.prepare(
+                'INSERT INTO wishlist_goals (id, family_id, title, target_cost, current_saved, icon, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+              )
+              data.forEach((r) => {
+                statements.push(
+                  insertStmt.bind(
+                    r.id,
+                    familyId,
+                    r.title,
+                    r.targetCost,
+                    r.currentSaved,
+                    r.icon,
+                    timestamp
+                  )
+                )
+              })
+            }
           } else if (scope === 'settings') {
             if (data) {
               const updateStmt = env.DB.prepare(`
@@ -206,7 +252,6 @@ export default {
             }
           } else if (scope === 'avatar') {
             // Update Avatar Data (balance is usually updated in activity, but can be here if needed, though separation is better)
-            // We might receive balance here if buying items updates balance immediately
             const avatarJson = data.avatar ? JSON.stringify(data.avatar) : null
 
             if (data.balance !== undefined) {
