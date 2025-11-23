@@ -1,3 +1,13 @@
+/*
+ * :file description:
+ * :name: \d1-template\src\index.ts
+ * :author: liuwei
+ * :copyright: (c) 2025, Tungee
+ * :date created: 2025-11-20 11:23:38
+ * :last editor: liuwei
+ * :date last edited: 2025-11-23 20:20:25
+ */
+
 export default {
   async fetch(request, env, ctx) {
     // Handle CORS
@@ -38,6 +48,7 @@ export default {
         // === GET: 读取并组装数据 ===
         if (request.method === 'GET') {
           const scope = url.searchParams.get('scope') || 'all' // 'all', 'daily', 'store', 'calendar', 'avatar', 'wishlist'
+          const month = url.searchParams.get('month') // Optional: YYYY-MM
 
           // 1. 获取基础设置 (Always fetch settings for balance/theme/avatar/stats)
           const settings = await env.DB.prepare(
@@ -92,11 +103,23 @@ export default {
           }
 
           if (scope === 'all' || scope === 'calendar' || scope === 'settings') {
+            let txSql = 'SELECT * FROM transactions WHERE family_id = ?'
+            const params = [familyId]
+
+            if (month) {
+              // If month is provided (YYYY-MM), filter by date string
+              txSql += ' AND date LIKE ?'
+              params.push(`${month}%`)
+              txSql += ' ORDER BY created_at DESC'
+            } else {
+              // If no month provided, fetch recent history with a much larger limit
+              // Increased from 100 to 5000 to prevent missing records
+              txSql += ' ORDER BY created_at DESC LIMIT 5000'
+            }
+
             promises.push(
-              env.DB.prepare(
-                'SELECT * FROM transactions WHERE family_id = ? ORDER BY created_at DESC LIMIT 100'
-              )
-                .bind(familyId)
+              env.DB.prepare(txSql)
+                .bind(...params)
                 .all()
                 .then((r) => (txResult = r))
             )
